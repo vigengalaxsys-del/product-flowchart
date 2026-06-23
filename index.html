@@ -76,7 +76,13 @@
 
   .pipeline{position:relative;}
   .stage{display:grid;grid-template-columns:var(--spine) 1fr;column-gap:18px;}
-  .spine{position:relative;display:flex;justify-content:center;}
+  .stage.dragging{opacity:.45;}
+  .stage.drop-before{box-shadow:0 -3px 0 -1px var(--accent);}
+  .stage.drop-after{box-shadow:0 3px 0 -1px var(--accent);}
+  .badge[data-grip]{cursor:grab;}
+  .badge[data-grip]:hover{border-color:var(--accent);color:var(--accent-dim);}
+  .badge[data-grip]:active{cursor:grabbing;}
+  .spine{position:relative;display:flex;flex-direction:column;align-items:center;}
   .spine::before{content:"";position:absolute;top:0;bottom:0;width:2px;background:var(--line);}
   .stage:first-child .spine::before{top:28px;}
   .stage:last-child .spine::before{bottom:calc(100% - 28px);}
@@ -256,7 +262,7 @@
 
   <div class="pipeline" id="pipeline"></div>
 
-  <footer>Status, dates, comments, sub-tasks and Frontend/Backend sections save automatically in this browser. Host this file (e.g. GitHub Pages) and bookmark it to keep a shared view.</footer>
+  <footer>Drag a phase by its numbered badge to reorder the sequence. Status, dates, comments, sub-tasks, sections and order save automatically in this browser — host this file (e.g. GitHub Pages) and bookmark it to keep a shared view.</footer>
 </div>
 
 <script>
@@ -277,6 +283,7 @@ const STATUSES = {
 const ORDER = ['todo','progress','done','blocked'];
 const KEY = 'galaxsys_ab_tracker_v2';
 const TOP_IDS = STAGES.flatMap(s => s.branch ? [s.id, s.branch.id] : [s.id]);
+const MAIN_IDS = STAGES.map(s=>s.id);
 const QA_IDS = new Set(STAGES.flatMap(s => (s.branch&&s.branch.qa?[s.branch.id]:[]).concat(s.qa?[s.id]:[])));
 const isQAItem = id => QA_IDS.has(id);
 const DEFAULTS = {s1:'done'};
@@ -307,7 +314,9 @@ function load(){
       }))
     };
   });
-  return {items, savedAt:saved.savedAt||''};
+  let order = Array.isArray(saved.order) ? saved.order.filter(id=>MAIN_IDS.includes(id)) : [];
+  MAIN_IDS.forEach(id=>{ if(!order.includes(id)) order.push(id); });
+  return {items, order, savedAt:saved.savedAt||''};
 }
 function save(){ state.savedAt=new Date().toISOString();
   try{ localStorage.setItem(KEY,JSON.stringify(state)); }catch(e){} renderSaved(); }
@@ -431,7 +440,9 @@ function subsHTML(pid){
 
 function render(){
   const root=document.getElementById('pipeline');
-  root.innerHTML = STAGES.map(s=>{
+  const byId = id => STAGES.find(s=>s.id===id);
+  root.innerHTML = state.order.map((sid,idx)=>{
+    const s = byId(sid); if(!s) return '';
     const st=state.items[s.id].status;
     const branch = s.branch ? `
       <div class="branch">
@@ -446,8 +457,10 @@ function render(){
           ${subsHTML(s.branch.id)}
         </div>
       </div>` : '';
-    return `<div class="stage">
-        <div class="spine"><div class="badge ${cls(st)}">${s.n}</div></div>
+    return `<div class="stage" data-stageid="${s.id}">
+        <div class="spine">
+          <div class="badge ${cls(st)}" data-grip title="Drag to reorder this phase">${idx+1}</div>
+        </div>
         <div class="row">
           <div class="card ${cls(st)}">
             <div class="card-head"><div><h3>${s.title}</h3><p class="desc">${s.desc}</p></div>
@@ -458,7 +471,7 @@ function render(){
           </div>${branch}
         </div></div>`;
   }).join('');
-  bind(); renderSummary();
+  bind(); bindDnD(); renderSummary();
 }
 
 function renderSummary(){
@@ -524,11 +537,51 @@ function bind(){
     sub.sections=sub.sections.filter(x=>x.id!==secid); save(); render(); }));
 }
 
+let dragId=null;
+function clearDropMarks(){ document.querySelectorAll('.stage').forEach(s=>s.classList.remove('drop-before','drop-after')); }
+function moveStage(draggedId, targetId, after){
+  if(draggedId===targetId) return;
+  const ord=state.order.filter(x=>x!==draggedId);
+  let idx=ord.indexOf(targetId); if(after) idx++;
+  ord.splice(idx,0,draggedId);
+  state.order=ord; save(); render();
+}
+function bindDnD(){
+  document.querySelectorAll('.stage').forEach(stage=>{
+    const grip=stage.querySelector('[data-grip]');
+    if(grip){
+      grip.addEventListener('mousedown',()=>stage.setAttribute('draggable','true'));
+      grip.addEventListener('touchstart',()=>stage.setAttribute('draggable','true'),{passive:true});
+    }
+    stage.addEventListener('dragstart',e=>{
+      dragId=stage.dataset.stageid;
+      e.dataTransfer.effectAllowed='move';
+      try{ e.dataTransfer.setData('text/plain',dragId); }catch(_){}
+      setTimeout(()=>stage.classList.add('dragging'),0);
+    });
+    stage.addEventListener('dragend',()=>{
+      stage.removeAttribute('draggable'); stage.classList.remove('dragging'); clearDropMarks(); dragId=null;
+    });
+    stage.addEventListener('dragover',e=>{
+      if(!dragId) return; e.preventDefault(); e.dataTransfer.dropEffect='move';
+      const r=stage.getBoundingClientRect(); const after=e.clientY > r.top + r.height/2;
+      clearDropMarks(); stage.classList.add(after?'drop-after':'drop-before');
+    });
+    stage.addEventListener('dragleave',()=>stage.classList.remove('drop-before','drop-after'));
+    stage.addEventListener('drop',e=>{
+      e.preventDefault(); if(!dragId) return;
+      const r=stage.getBoundingClientRect(); const after=e.clientY > r.top + r.height/2;
+      moveStage(dragId, stage.dataset.stageid, after);
+    });
+  });
+}
+document.addEventListener('mouseup',()=>document.querySelectorAll('.stage[draggable]').forEach(s=>s.removeAttribute('draggable')));
+
 document.addEventListener('click',closeMenus);
 document.getElementById('resetBtn').addEventListener('click',()=>{
   if(confirm('Reset every stage, clear all dates, comments, sub-tasks and sections?')){
     try{ localStorage.removeItem(KEY); }catch(e){}
-    state={items:{},savedAt:''}; TOP_IDS.forEach(id=>state.items[id]=blankItem(id)); save(); render();
+    state={items:{},order:MAIN_IDS.slice(),savedAt:''}; TOP_IDS.forEach(id=>state.items[id]=blankItem(id)); save(); render();
   }
 });
 
